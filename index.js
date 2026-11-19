@@ -12,6 +12,8 @@ const PORT = process.env.PORT || 5000;
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5000",
+  "https://salonbookpro.vercel.app",
+  "https://api-salonbookpro.vercel.app",
   process.env.CLIENT_URL,
 ].filter(Boolean);
 
@@ -252,6 +254,40 @@ app.get("/api/services/:id", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch service details",
+      error: error.message,
+    });
+  }
+});
+
+// GET /api/categories - Aggregate categories with active service counts
+app.get("/api/categories", async (req, res) => {
+  try {
+    const categories = await servicesCollection
+      .aggregate([
+        { $match: { status: "active" } },
+        {
+          $group: {
+            _id: "$category",
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ])
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      count: categories.length,
+      data: categories.map((c) => ({
+        category: c._id,
+        count: c.count,
+      })),
+    });
+  } catch (error) {
+    console.error("Error fetching categories:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch categories",
       error: error.message,
     });
   }
