@@ -46,6 +46,7 @@ export async function connectToMongoDB() {
 const mongoClient = await connectToMongoDB();
 const db = mongoClient.db("salonbook_db");
 const usersCollection = db.collection("user");
+const servicesCollection = db.collection("services");
 
 // HTTPOnly Cookie Configuration
 const cookieOptions = {
@@ -163,6 +164,98 @@ app.post("/api/jwt", async (req, res) => {
 });
 
 
+
+// ---------------- SERVICES APIs ---------------- //
+
+// GET /api/services - Fetch active services with optional search, category, sort & limit
+app.get("/api/services", async (req, res) => {
+  try {
+    const { category, search, sort, limit, status } = req.query;
+
+    const query = {};
+
+    // Filter active services by default per requirements
+    if (status) {
+      query.status = status;
+    } else {
+      query.status = "active";
+    }
+
+    // Filter by Category
+    if (category && category !== "All") {
+      query.category = category;
+    }
+
+    // Search by Service Name
+    if (search && search.trim() !== "") {
+      query.serviceName = { $regex: search.trim(), $options: "i" };
+    }
+
+    // Sorting
+    let sortOptions = { createdAt: -1 };
+    if (sort === "price_asc") {
+      sortOptions = { price: 1 };
+    } else if (sort === "price_desc") {
+      sortOptions = { price: -1 };
+    }
+
+    let cursor = servicesCollection.find(query).sort(sortOptions);
+
+    if (limit && !isNaN(Number(limit))) {
+      cursor = cursor.limit(Number(limit));
+    }
+
+    const services = await cursor.toArray();
+
+    res.status(200).json({
+      success: true,
+      count: services.length,
+      data: services,
+    });
+  } catch (error) {
+    console.error("Error fetching services:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch services",
+      error: error.message,
+    });
+  }
+});
+
+// GET /api/services/:id - Fetch single service by ID
+app.get("/api/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID format",
+      });
+    }
+
+    const service = await servicesCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: service,
+    });
+  } catch (error) {
+    console.error("Error fetching service details:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch service details",
+      error: error.message,
+    });
+  }
+});
 
 // API check
 app.get("/", (req, res) => {
