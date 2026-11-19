@@ -49,6 +49,7 @@ const mongoClient = await connectToMongoDB();
 const db = mongoClient.db("salonbook_db");
 const usersCollection = db.collection("user");
 const servicesCollection = db.collection("services");
+const categoriesCollection = db.collection("categories");
 
 // HTTPOnly Cookie Configuration
 const cookieOptions = {
@@ -169,14 +170,15 @@ app.post("/api/jwt", async (req, res) => {
 
 // ---------------- SERVICES APIs ---------------- //
 
-// GET /api/services - Fetch active services with optional search, category, sort & limit
+
+// get active services with optional search, category, sort & limit
 app.get("/api/services", async (req, res) => {
   try {
     const { category, search, sort, limit, status } = req.query;
 
     const query = {};
 
-    // Filter active services by default per requirements
+    // Filter active services
     if (status) {
       query.status = status;
     } else {
@@ -224,7 +226,7 @@ app.get("/api/services", async (req, res) => {
   }
 });
 
-// GET /api/services/:id - Fetch single service by ID
+// get single service by ID
 app.get("/api/services/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -259,29 +261,18 @@ app.get("/api/services/:id", async (req, res) => {
   }
 });
 
-// GET /api/categories - Aggregate categories with active service counts
+// get categories list
 app.get("/api/categories", async (req, res) => {
   try {
-    const categories = await servicesCollection
-      .aggregate([
-        { $match: { status: "active" } },
-        {
-          $group: {
-            _id: "$category",
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ])
+    const categories = await categoriesCollection
+      .find()
+      .sort({ order: 1 })
       .toArray();
 
     res.status(200).json({
       success: true,
       count: categories.length,
-      data: categories.map((c) => ({
-        category: c._id,
-        count: c.count,
-      })),
+      data: categories,
     });
   } catch (error) {
     console.error("Error fetching categories:", error);
