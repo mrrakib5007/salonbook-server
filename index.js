@@ -4,6 +4,7 @@ import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
+import multer from "multer";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -279,6 +280,70 @@ app.get("/api/categories", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch categories",
+      error: error.message,
+    });
+  }
+});
+
+// Multer memory storage for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+});
+
+// Image upload API using ImgBB
+app.post("/api/upload", upload.single("image"), async (req, res) => {
+  try {
+    const apiKey = process.env.IMGBB_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({
+        success: false,
+        message: "IMGBB_API_KEY is not configured on the server",
+      });
+    }
+
+    let base64Image = null;
+
+    if (req.file) {
+      base64Image = req.file.buffer.toString("base64");
+    } else if (req.body?.image) {
+      base64Image = req.body.image.replace(/^data:image\/\w+;base64,/, "");
+    }
+
+    if (!base64Image) {
+      return res.status(400).json({
+        success: false,
+        message: "No image file or image data provided",
+      });
+    }
+
+    const imgbbForm = new FormData();
+    imgbbForm.append("image", base64Image);
+
+    const response = await fetch(`https://api.imgbb.com/1/upload?key=${apiKey}`, {
+      method: "POST",
+      body: imgbbForm,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.success || !data.data?.url) {
+      return res.status(502).json({
+        success: false,
+        message: data?.error?.message || "Failed to upload image to ImgBB",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      url: data.data.url,
+      display_url: data.data.display_url,
+    });
+  } catch (error) {
+    console.error("Server image upload error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error during image upload",
       error: error.message,
     });
   }
