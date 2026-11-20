@@ -51,6 +51,7 @@ const db = mongoClient.db("salonbook_db");
 const usersCollection = db.collection("user");
 const servicesCollection = db.collection("services");
 const categoriesCollection = db.collection("categories");
+const appointmentsCollection = db.collection("appointments");
 
 // HTTPOnly Cookie Configuration
 const cookieOptions = {
@@ -71,7 +72,11 @@ export const verifyJWT = async (req, res, next) => {
   // Check for better auth session cookie if token cookie not present
   const betterAuthToken =
     req.cookies?.["better-auth.session_token"] ||
-    req.cookies?.["__Secure-better-auth.session_token"];
+    req.cookies?.["__Secure-better-auth.session_token"] ||
+    req.headers?.["x-session-token"] ||
+    (req.headers?.authorization?.startsWith("Bearer ")
+      ? req.headers.authorization.split(" ")[1]
+      : null);
 
   if (!token && !betterAuthToken) {
     return res.status(401).json({
@@ -101,21 +106,35 @@ export const verifyJWT = async (req, res, next) => {
   // Fallback check for Better-Auth session in database
   if (betterAuthToken) {
     try {
+      const decodedToken = decodeURIComponent(betterAuthToken);
+      const rawToken = decodedToken.includes(".")
+        ? decodedToken.split(".")[0]
+        : decodedToken;
+
       const sessionsCollection = db.collection("session");
       const sessionDoc = await sessionsCollection.findOne({
-        token: betterAuthToken,
+        token: { $in: [betterAuthToken, decodedToken, rawToken] },
         expiresAt: { $gt: new Date() },
       });
 
       if (sessionDoc) {
         const usersCollection = db.collection("user");
-        const userDoc = await usersCollection.findOne({
-          _id: sessionDoc.userId,
-        });
+        let userDoc = null;
+        if (sessionDoc.userId) {
+          userDoc = await usersCollection.findOne({
+            _id: sessionDoc.userId,
+          });
+          if (!userDoc && ObjectId.isValid(sessionDoc.userId)) {
+            userDoc = await usersCollection.findOne({
+              _id: new ObjectId(sessionDoc.userId),
+            });
+          }
+        }
         req.user = {
-          id: sessionDoc.userId,
-          email: userDoc?.email || sessionDoc.userId,
+          id: String(sessionDoc.userId),
+          email: userDoc?.email || String(sessionDoc.userId),
           name: userDoc?.name,
+          role: userDoc?.role || "user",
         };
         return next();
       }
@@ -232,14 +251,13 @@ app.get("/api/services/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid service ID format",
-      });
+    let service = null;
+    if (ObjectId.isValid(id)) {
+      service = await servicesCollection.findOne({ _id: new ObjectId(id) });
     }
-
-    const service = await servicesCollection.findOne({ _id: new ObjectId(id) });
+    if (!service) {
+      service = await servicesCollection.findOne({ _id: id });
+    }
 
     if (!service) {
       return res.status(404).json({
@@ -282,6 +300,145 @@ app.get("/api/categories", async (req, res) => {
       message: "Failed to fetch categories",
       error: error.message,
     });
+  }
+});
+
+// Create a new appointment booking (Protected)
+app.post("/api/appointments", verifyJWT, async (req, res) => {
+  try {
+    const {
+      serviceId,
+      customerId,
+      customerName,
+      customerEmail,
+      customerRole,
+      appointmentDate,
+      appointmentTime,
+      message,
+    } = req.body;
+
+    // Rule: Admins cannot submit customer appointment requests
+    const actualRole = req.user?.role || customerRole || "user";
+    if (actualRole === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Administrators cannot book customer appointments.",
+      });
+    }
+
+    if (!serviceId || !appointmentDate || !appointmentTime) {
+      return res.status(400).json({
+        success: false,
+        message: "Service ID, appointment date, and time slot are required.",
+      });
+    }
+
+    if (!ObjectId.isValid(serviceId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID format.",
+      });
+    }
+
+    // Rule: Verify service exists and is active
+    const service = await servicesCollection.findOne({ _id: new ObjectId(serviceId) });
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    if (service.status !== "active") {
+      return res.status(400).json({
+        success: false,
+        message: "This service is currently inactive and cannot be booked.",
+      });
+    }
+
+    // Rule: Prevent duplicate active appointments for the same service, date, and time slot
+    const serviceQueryId = ObjectId.isValid(serviceId)
+      ? new ObjectId(serviceId)
+      : serviceId;
+
+    const existing = await appointmentsCollection.findOne({
+      serviceId: serviceQueryId,
+      appointmentDate,
+      appointmentTime,
+      appointmentStatus: { $ne: "Cancelled" },
+    });
+
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: "This time slot is already booked for this service on the selected date. Please choose another time slot.",
+      });
+    }
+
+    const newAppointment = {
+      customerId: customerId || req.user?.id || "",
+      customerName: customerName || req.user?.name || "Customer",
+      customerEmail: customerEmail || req.user?.email || "",
+      serviceId: new ObjectId(serviceId),
+      serviceName: service.serviceName,
+      serviceImage: service.image,
+      category: service.category,
+      price: service.price,
+      duration: service.duration,
+      appointmentDate,
+      appointmentTime,
+      message: message ? message.trim() : "",
+      appointmentStatus: "Pending", // Default Status
+      paymentStatus: "Unpaid",       // Default Payment Status
+      createdAt: new Date(),
+    };
+
+    const result = await appointmentsCollection.insertOne(newAppointment);
+
+    res.status(201).json({
+      success: true,
+      message: "Appointment request submitted successfully!",
+      data: { ...newAppointment, _id: result.insertedId },
+    });
+  } catch (error) {
+    console.error("Error creating appointment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create appointment request.",
+      error: error.message,
+    });
+  }
+});
+
+// Get booked slots for a specific date and service (Public availability check)
+app.get("/api/appointments/booked-slots", async (req, res) => {
+  try {
+    const { date, serviceId } = req.query;
+    if (!date) {
+      return res.status(200).json({ success: true, bookedSlots: [] });
+    }
+
+    const query = {
+      appointmentDate: date,
+      appointmentStatus: { $ne: "Cancelled" },
+    };
+
+    if (serviceId) {
+      query.serviceId = ObjectId.isValid(serviceId)
+        ? new ObjectId(serviceId)
+        : serviceId;
+    }
+
+    const appointments = await appointmentsCollection
+      .find(query)
+      .project({ appointmentTime: 1 })
+      .toArray();
+
+    const bookedSlots = appointments.map((a) => a.appointmentTime);
+    res.status(200).json({ success: true, bookedSlots });
+  } catch (error) {
+    console.error("Error fetching booked slots:", error);
+    res.status(500).json({ success: false, bookedSlots: [] });
   }
 });
 
