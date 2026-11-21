@@ -132,12 +132,21 @@ export const verifyJWT = async (req, res, next) => {
             });
           }
         }
+        if (userDoc?.isBlocked && userDoc?.role !== "admin") {
+          return res.status(403).json({
+            success: false,
+            message: "Account Blocked: Your account has been restricted by an administrator. You cannot access protected platform features.",
+            isBlocked: true,
+          });
+        }
+
         req.user = {
           id: String(sessionDoc.userId),
           email: userDoc?.email || String(sessionDoc.userId),
           name: userDoc?.name,
           role: userDoc?.role || "user",
           image: userDoc?.image || "",
+          isBlocked: Boolean(userDoc?.isBlocked),
         };
         return next();
       }
@@ -1413,6 +1422,285 @@ app.patch("/api/admin/appointments/:id/cancel", verifyJWT, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to cancel appointment.",
+      error: error.message,
+    });
+  }
+});
+
+/* ========================================
+      Admin Manage Users APIs
+======================================== */
+
+// GET all registered customers
+app.get("/api/admin/users", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { search, status, sort } = req.query;
+    const query = { role: { $ne: "admin" } };
+
+    // Filter by Account Status (Active vs Blocked)
+    if (status === "active") {
+      query.isBlocked = { $ne: true };
+    } else if (status === "blocked") {
+      query.isBlocked = true;
+    }
+
+    // Search filter across name and email
+    if (search && search.trim()) {
+      const searchRegex = new RegExp(search.trim(), "i");
+      query.$or = [
+        { name: searchRegex },
+        { email: searchRegex },
+      ];
+    }
+
+    // Sorting
+    let sortOption = { createdAt: -1 };
+    if (sort === "oldest") {
+      sortOption = { createdAt: 1 };
+    } else if (sort === "name_asc") {
+      sortOption = { name: 1 };
+    } else if (sort === "name_desc") {
+      sortOption = { name: -1 };
+    }
+
+    const users = await usersCollection
+      .find(query)
+      .sort(sortOption)
+      .toArray();
+
+    // Calculate appointment counts for each customer
+    const userEmails = users.map((u) => u.email).filter(Boolean);
+    const userIds = users.map((u) => String(u._id)).filter(Boolean);
+
+    const appointments = await appointmentsCollection
+      .find({
+        $or: [
+          { customerEmail: { $in: userEmails } },
+          { customerId: { $in: userIds } },
+        ],
+      })
+      .project({ customerEmail: 1, customerId: 1, appointmentStatus: 1 })
+      .toArray();
+
+    const countsMap = new Map();
+    for (const appt of appointments) {
+      const email = appt.customerEmail;
+      const id = String(appt.customerId);
+      if (email) countsMap.set(email, (countsMap.get(email) || 0) + 1);
+      if (id && id !== email) countsMap.set(id, (countsMap.get(id) || 0) + 1);
+    }
+
+    const sanitizedUsers = users.map((u) => ({
+      _id: String(u._id),
+      name: u.name || "Customer",
+      email: u.email || "",
+      image: u.image || "",
+      role: u.role || "user",
+      isBlocked: Boolean(u.isBlocked),
+      phone: u.phone || u.phoneNumber || "",
+      createdAt: u.createdAt || null,
+      totalBookings: countsMap.get(u.email) || countsMap.get(String(u._id)) || 0,
+    }));
+
+    res.status(200).json({
+      success: true,
+      users: sanitizedUsers,
+      total: sanitizedUsers.length,
+    });
+  } catch (error) {
+    console.error("Error fetching admin users:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch users list.",
+      error: error.message,
+    });
+  }
+});
+
+// GET single customer details by ID
+app.get("/api/admin/users/:id", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required.",
+      });
+    }
+
+    let userDoc = await usersCollection.findOne({ _id: id });
+    if (!userDoc && ObjectId.isValid(id)) {
+      userDoc = await usersCollection.findOne({ _id: new ObjectId(id) });
+    }
+
+    if (!userDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    // Get user's appointment statistics
+    const customerFilter = [{ customerEmail: userDoc.email }];
+    if (userDoc._id) customerFilter.push({ customerId: String(userDoc._id) });
+
+    const totalCount = await appointmentsCollection.countDocuments({
+      $or: customerFilter,
+    });
+
+    res.status(200).json({
+      success: true,
+      user: {
+        _id: String(userDoc._id),
+        name: userDoc.name || "Customer",
+        email: userDoc.email || "",
+        image: userDoc.image || "",
+        role: userDoc.role || "user",
+        isBlocked: Boolean(userDoc.isBlocked),
+        phone: userDoc.phone || userDoc.phoneNumber || "",
+        createdAt: userDoc.createdAt || null,
+        blockedAt: userDoc.blockedAt || null,
+        totalBookings: totalCount,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching user details:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch user details.",
+      error: error.message,
+    });
+  }
+});
+
+// Block a customer account
+app.patch("/api/admin/users/:id/block", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required.",
+      });
+    }
+
+    let filter = { _id: id };
+    let userDoc = await usersCollection.findOne(filter);
+    if (!userDoc && ObjectId.isValid(id)) {
+      filter = { _id: new ObjectId(id) };
+      userDoc = await usersCollection.findOne(filter);
+    }
+
+    if (!userDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    if (userDoc.role === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Administrator accounts cannot be blocked.",
+      });
+    }
+
+    const now = new Date();
+    await usersCollection.updateOne(filter, {
+      $set: {
+        isBlocked: true,
+        blockedAt: now,
+        updatedAt: now,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Customer ${userDoc.name || userDoc.email} has been blocked successfully.`,
+      isBlocked: true,
+    });
+  } catch (error) {
+    console.error("Error blocking user:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to block user.",
+      error: error.message,
+    });
+  }
+});
+
+// Unblock a customer account
+app.patch("/api/admin/users/:id/unblock", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required.",
+      });
+    }
+
+    let filter = { _id: id };
+    let userDoc = await usersCollection.findOne(filter);
+    if (!userDoc && ObjectId.isValid(id)) {
+      filter = { _id: new ObjectId(id) };
+      userDoc = await usersCollection.findOne(filter);
+    }
+
+    if (!userDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    const now = new Date();
+    await usersCollection.updateOne(filter, {
+      $set: {
+        isBlocked: false,
+        unblockedAt: now,
+        updatedAt: now,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Customer ${userDoc.name || userDoc.email} has been unblocked successfully.`,
+      isBlocked: false,
+    });
+  } catch (error) {
+    console.error("Error unblocking user:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to unblock user.",
       error: error.message,
     });
   }
