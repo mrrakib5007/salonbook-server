@@ -28,6 +28,8 @@ app.use(
       return callback(null, true);
     },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-session-token"],
   })
 );
 app.use(cookieParser());
@@ -511,7 +513,149 @@ app.get("/api/customer/stats", verifyJWT, async (req, res) => {
   }
 });
 
+// Get All Appointments for Authenticated Customer (Protected)
+app.get("/api/customer/appointments", verifyJWT, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
 
+    if (!userId && !userEmail) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: User identification missing",
+      });
+    }
+
+    // Rule: Admins cannot access customer appointments
+    if (req.user?.role === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Administrators cannot view customer appointments list",
+      });
+    }
+
+    const customerFilter = [];
+    if (userId) {
+      customerFilter.push({ customerId: userId });
+      customerFilter.push({ customerId: String(userId) });
+      if (ObjectId.isValid(userId)) {
+        customerFilter.push({ customerId: new ObjectId(userId) });
+      }
+    }
+    if (userEmail) {
+      customerFilter.push({ customerEmail: userEmail });
+    }
+
+    const query = { $or: customerFilter };
+
+    const { status } = req.query;
+    if (status && status !== "all" && ["Pending", "Confirmed", "Cancelled"].includes(status)) {
+      query.appointmentStatus = status;
+    }
+
+    const appointments = await appointmentsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      appointments,
+    });
+  } catch (error) {
+    console.error("Error fetching customer appointments:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch customer appointments",
+      error: error.message,
+    });
+  }
+});
+
+// Cancel a Pending Appointment by Customer (Protected)
+app.patch("/api/customer/appointments/:id/cancel", verifyJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Appointment ID is required",
+      });
+    }
+
+    if (req.user?.role === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Administrators cannot cancel customer appointment via this route",
+      });
+    }
+
+    let appointment = null;
+    if (ObjectId.isValid(id)) {
+      appointment = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    }
+    if (!appointment) {
+      appointment = await appointmentsCollection.findOne({ _id: id });
+    }
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found",
+      });
+    }
+
+    // Verify ownership
+    const isOwner =
+      (userId && String(appointment.customerId) === String(userId)) ||
+      (userEmail && appointment.customerEmail === userEmail);
+
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not authorized to cancel this appointment",
+      });
+    }
+
+    // Rule: Customers can only cancel pending appointment requests
+    if (appointment.appointmentStatus !== "Pending") {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel an appointment with '${appointment.appointmentStatus}' status. Only pending requests can be cancelled.`,
+      });
+    }
+
+    const filter = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { _id: id };
+    await appointmentsCollection.updateOne(filter, {
+      $set: {
+        appointmentStatus: "Cancelled",
+        cancelledAt: new Date(),
+        cancelledBy: "customer",
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Appointment request cancelled successfully.",
+    });
+  } catch (error) {
+    console.error("Error cancelling customer appointment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to cancel appointment request",
+      error: error.message,
+    });
+  }
+});
+
+
+
+/* ========================================
+      Image upload api
+======================================== */
 
 // Multer memory storage for file uploads
 const upload = multer({
