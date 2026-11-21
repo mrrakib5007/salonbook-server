@@ -652,10 +652,62 @@ app.patch("/api/customer/appointments/:id/cancel", verifyJWT, async (req, res) =
 });
 
 /* ========================================
+      Admin Dashboard APIs
+======================================== */
+
+// GET Overview for Admin Dashboard
+app.get("/api/admin/stats", verifyJWT, async (req, res) => {
+  try {
+    // Rule: Only Admin can access admin stats
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    const [
+      totalCustomers,
+      totalActiveServices,
+      totalAppointments,
+      pendingAppointments,
+      confirmedAppointments,
+      totalSuccessfulPayments,
+    ] = await Promise.all([
+      usersCollection.countDocuments({ role: { $ne: "admin" } }),
+      servicesCollection.countDocuments({ status: { $in: ["active", "Active"] } }),
+      appointmentsCollection.countDocuments({}),
+      appointmentsCollection.countDocuments({ appointmentStatus: "Pending" }),
+      appointmentsCollection.countDocuments({ appointmentStatus: "Confirmed" }),
+      appointmentsCollection.countDocuments({ paymentStatus: "Paid" }),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      stats: {
+        totalCustomers,
+        totalActiveServices,
+        totalAppointments,
+        pendingAppointments,
+        confirmedAppointments,
+        totalSuccessfulPayments,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching admin stats:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch admin dashboard statistics",
+      error: error.message,
+    });
+  }
+});
+
+/* ========================================
       User Profile APIs
 ======================================== */
 
-// GET /api/user/profile - Fetch authenticated user profile
+// GET authenticated user profile
 app.get("/api/user/profile", verifyJWT, async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -707,7 +759,7 @@ app.get("/api/user/profile", verifyJWT, async (req, res) => {
   }
 });
 
-// PATCH /api/user/profile - Update permitted user profile information
+// Update user profile information
 app.patch("/api/user/profile", verifyJWT, async (req, res) => {
   try {
     const userId = req.user?.id;
