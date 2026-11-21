@@ -188,8 +188,10 @@ app.post("/api/jwt", async (req, res) => {
 
 
 
-// ---------------- SERVICES APIs ---------------- //
 
+/* ========================================
+     SERVICES APIs
+======================================== */
 
 // get active services with optional search, category, sort & limit
 app.get("/api/services", async (req, res) => {
@@ -441,6 +443,75 @@ app.get("/api/appointments/booked-slots", async (req, res) => {
     res.status(500).json({ success: false, bookedSlots: [] });
   }
 });
+
+
+/* ========================================
+      Customer Dashboard
+======================================== */
+
+// Customer Dashboard Stats (Protected)
+app.get("/api/customer/stats", verifyJWT, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    if (!userId && !userEmail) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: User identification missing",
+      });
+    }
+
+    // Rule: Admins cannot access customer stats
+    if (req.user?.role === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Administrators cannot access customer stats",
+      });
+    }
+
+    // Match customer appointments by customerId or customerEmail
+    const customerFilter = [];
+    if (userId) {
+      customerFilter.push({ customerId: userId });
+      customerFilter.push({ customerId: String(userId) });
+      if (ObjectId.isValid(userId)) {
+        customerFilter.push({ customerId: new ObjectId(userId) });
+      }
+    }
+    if (userEmail) {
+      customerFilter.push({ customerEmail: userEmail });
+    }
+
+    const query = { $or: customerFilter };
+
+    const [total, pending, confirmed, cancelled] = await Promise.all([
+      appointmentsCollection.countDocuments(query),
+      appointmentsCollection.countDocuments({ ...query, appointmentStatus: "Pending" }),
+      appointmentsCollection.countDocuments({ ...query, appointmentStatus: "Confirmed" }),
+      appointmentsCollection.countDocuments({ ...query, appointmentStatus: "Cancelled" }),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      stats: {
+        total,
+        pending,
+        confirmed,
+        cancelled,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching customer dashboard stats:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch customer dashboard stats",
+      error: error.message,
+    });
+  }
+});
+
+
 
 // Multer memory storage for file uploads
 const upload = multer({
