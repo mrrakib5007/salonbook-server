@@ -137,6 +137,7 @@ export const verifyJWT = async (req, res, next) => {
           email: userDoc?.email || String(sessionDoc.userId),
           name: userDoc?.name,
           role: userDoc?.role || "user",
+          image: userDoc?.image || "",
         };
         return next();
       }
@@ -383,6 +384,7 @@ app.post("/api/appointments", verifyJWT, async (req, res) => {
       customerId: customerId || req.user?.id || "",
       customerName: customerName || req.user?.name || "Customer",
       customerEmail: customerEmail || req.user?.email || "",
+      customerImage: req.user?.image || "",
       serviceId: new ObjectId(serviceId),
       serviceName: service.serviceName,
       serviceImage: service.image,
@@ -1080,6 +1082,337 @@ app.delete("/api/admin/services/:id", verifyJWT, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to delete service",
+      error: error.message,
+    });
+  }
+});
+
+/* ========================================
+      Admin Manage Appointments APIs
+======================================== */
+
+// GET all appointments 
+app.get("/api/admin/appointments", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { search, status, paymentStatus, sort } = req.query;
+    const query = {};
+
+    // Filter by Appointment Status
+    if (
+      status &&
+      status !== "all" &&
+      ["Pending", "Confirmed", "Cancelled"].includes(status)
+    ) {
+      query.appointmentStatus = status;
+    }
+
+    // Filter by Payment Status
+    if (
+      paymentStatus &&
+      paymentStatus !== "all" &&
+      ["Paid", "Unpaid"].includes(paymentStatus)
+    ) {
+      query.paymentStatus = paymentStatus;
+    }
+
+    // Search filter across customerName, customerEmail, and serviceName
+    if (search && search.trim()) {
+      const searchRegex = new RegExp(search.trim(), "i");
+      query.$or = [
+        { customerName: searchRegex },
+        { customerEmail: searchRegex },
+        { serviceName: searchRegex },
+      ];
+    }
+
+    // Sorting
+    let sortOption = { createdAt: -1 };
+    if (sort === "oldest") {
+      sortOption = { createdAt: 1 };
+    } else if (sort === "date_asc") {
+      sortOption = { appointmentDate: 1, appointmentTime: 1 };
+    } else if (sort === "date_desc") {
+      sortOption = { appointmentDate: -1, appointmentTime: -1 };
+    } else if (sort === "price_desc") {
+      sortOption = { price: -1 };
+    } else if (sort === "price_asc") {
+      sortOption = { price: 1 };
+    }
+
+    const appointments = await appointmentsCollection
+      .find(query)
+      .sort(sortOption)
+      .toArray();
+
+    // Look up user profiles to enrich customerImage if available
+    const customerEmails = [
+      ...new Set(appointments.map((a) => a.customerEmail).filter(Boolean)),
+    ];
+    const customerIds = [
+      ...new Set(appointments.map((a) => a.customerId).filter(Boolean)),
+    ];
+
+    const orClauses = [];
+    if (customerEmails.length > 0) {
+      orClauses.push({ email: { $in: customerEmails } });
+    }
+    if (customerIds.length > 0) {
+      orClauses.push({ _id: { $in: customerIds } });
+      const validObjIds = customerIds
+        .filter((id) => ObjectId.isValid(id))
+        .map((id) => new ObjectId(id));
+      if (validObjIds.length > 0) {
+        orClauses.push({ _id: { $in: validObjIds } });
+      }
+    }
+
+    let matchedUsers = [];
+    if (orClauses.length > 0) {
+      matchedUsers = await usersCollection.find({ $or: orClauses }).toArray();
+    }
+
+    const userMapByEmail = new Map();
+    const userMapById = new Map();
+    for (const u of matchedUsers) {
+      if (u.email) userMapByEmail.set(u.email, u);
+      if (u._id) userMapById.set(String(u._id), u);
+    }
+
+    const enrichedAppointments = appointments.map((appt) => {
+      const u =
+        (appt.customerEmail && userMapByEmail.get(appt.customerEmail)) ||
+        (appt.customerId && userMapById.get(String(appt.customerId)));
+      return {
+        ...appt,
+        customerImage: appt.customerImage || u?.image || "",
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      appointments: enrichedAppointments,
+      total: enrichedAppointments.length,
+    });
+  } catch (error) {
+    console.error("Error fetching admin appointments:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointments.",
+      error: error.message,
+    });
+  }
+});
+
+// GET single appointment details by ID
+app.get("/api/admin/appointments/:id", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Appointment ID is required.",
+      });
+    }
+
+    let appointment = null;
+    if (ObjectId.isValid(id)) {
+      appointment = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    }
+    if (!appointment) {
+      appointment = await appointmentsCollection.findOne({ _id: id });
+    }
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found.",
+      });
+    }
+
+    let customerImage = appointment.customerImage || "";
+    if (!customerImage && (appointment.customerEmail || appointment.customerId)) {
+      const orClauses = [];
+      if (appointment.customerEmail) orClauses.push({ email: appointment.customerEmail });
+      if (appointment.customerId) {
+        orClauses.push({ _id: appointment.customerId });
+        if (ObjectId.isValid(appointment.customerId)) {
+          orClauses.push({ _id: new ObjectId(appointment.customerId) });
+        }
+      }
+      if (orClauses.length > 0) {
+        const userDoc = await usersCollection.findOne({ $or: orClauses });
+        if (userDoc?.image) {
+          customerImage = userDoc.image;
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      appointment: {
+        ...appointment,
+        customerImage,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching single appointment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointment details.",
+      error: error.message,
+    });
+  }
+});
+
+// Confirm a Pending Appointment
+app.patch("/api/admin/appointments/:id/confirm", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Appointment ID is required.",
+      });
+    }
+
+    let appointment = null;
+    if (ObjectId.isValid(id)) {
+      appointment = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    }
+    if (!appointment) {
+      appointment = await appointmentsCollection.findOne({ _id: id });
+    }
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found.",
+      });
+    }
+
+    // Rule: Only pending appointments can be confirmed
+    if (appointment.appointmentStatus !== "Pending") {
+      return res.status(400).json({
+        success: false,
+        message: `Only pending appointments can be confirmed. Current status is '${appointment.appointmentStatus}'.`,
+      });
+    }
+
+    const now = new Date();
+    await appointmentsCollection.updateOne(
+      { _id: appointment._id },
+      {
+        $set: {
+          appointmentStatus: "Confirmed",
+          confirmedAt: now,
+          updatedAt: now,
+        },
+      }
+    );
+
+    const updated = await appointmentsCollection.findOne({ _id: appointment._id });
+
+    res.status(200).json({
+      success: true,
+      message: "Appointment confirmed successfully!",
+      appointment: updated,
+    });
+  } catch (error) {
+    console.error("Error confirming appointment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to confirm appointment.",
+      error: error.message,
+    });
+  }
+});
+
+// Cancel an Appointment
+app.patch("/api/admin/appointments/:id/cancel", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Administrator privileges required.",
+      });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Appointment ID is required.",
+      });
+    }
+
+    let appointment = null;
+    if (ObjectId.isValid(id)) {
+      appointment = await appointmentsCollection.findOne({ _id: new ObjectId(id) });
+    }
+    if (!appointment) {
+      appointment = await appointmentsCollection.findOne({ _id: id });
+    }
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found.",
+      });
+    }
+
+    // Rule: If already cancelled, do not cancel again
+    if (appointment.appointmentStatus === "Cancelled") {
+      return res.status(400).json({
+        success: false,
+        message: "This appointment has already been cancelled.",
+      });
+    }
+
+    const now = new Date();
+    await appointmentsCollection.updateOne(
+      { _id: appointment._id },
+      {
+        $set: {
+          appointmentStatus: "Cancelled",
+          cancelledAt: now,
+          updatedAt: now,
+        },
+      }
+    );
+
+    const updated = await appointmentsCollection.findOne({ _id: appointment._id });
+
+    res.status(200).json({
+      success: true,
+      message: "Appointment cancelled successfully. The time slot is now available again.",
+      appointment: updated,
+    });
+  } catch (error) {
+    console.error("Error cancelling appointment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to cancel appointment.",
       error: error.message,
     });
   }
