@@ -703,6 +703,388 @@ app.get("/api/admin/stats", verifyJWT, async (req, res) => {
   }
 });
 
+// GET all services (Admin only)
+app.get("/api/admin/services", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    const { category, search, status, sort } = req.query;
+    const query = {};
+
+    // Status filter
+    if (status && status !== "all" && status !== "All") {
+      query.status = status.toLowerCase();
+    }
+
+    // Category filter
+    if (category && category !== "all" && category !== "All") {
+      query.category = category;
+    }
+
+    // Search by service name, category, or description
+    if (search && search.trim()) {
+      const searchRegex = { $regex: search.trim(), $options: "i" };
+      query.$or = [
+        { serviceName: searchRegex },
+        { category: searchRegex },
+        { description: searchRegex },
+      ];
+    }
+
+    // Sort options
+    let sortOptions = { createdAt: -1 };
+    if (sort === "price_asc") {
+      sortOptions = { price: 1 };
+    } else if (sort === "price_desc") {
+      sortOptions = { price: -1 };
+    } else if (sort === "name_asc") {
+      sortOptions = { serviceName: 1 };
+    } else if (sort === "oldest") {
+      sortOptions = { createdAt: 1 };
+    }
+
+    const services = await servicesCollection.find(query).sort(sortOptions).toArray();
+
+    res.status(200).json({
+      success: true,
+      count: services.length,
+      data: services,
+    });
+  } catch (error) {
+    console.error("Error fetching admin services:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch services",
+      error: error.message,
+    });
+  }
+});
+
+// create a new service (Admin only)
+app.post("/api/admin/services", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    const {
+      serviceName,
+      category,
+      description,
+      price,
+      duration,
+      image,
+      status,
+    } = req.body || {};
+
+    // Required fields validation
+    if (!serviceName || !serviceName.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Service name is required",
+      });
+    }
+
+    if (!category || !category.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Service category is required",
+      });
+    }
+
+    if (!description || !description.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Service description is required",
+      });
+    }
+
+    const parsedPrice = Number(price);
+    if (isNaN(parsedPrice) || parsedPrice <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Price must be a positive number",
+      });
+    }
+
+    const parsedDuration = Number(duration);
+    if (isNaN(parsedDuration) || parsedDuration <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Duration must be a positive number (in minutes)",
+      });
+    }
+
+    if (!image || !image.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Service image is required",
+      });
+    }
+
+    const finalStatus =
+      status === "inactive" || status === "Inactive" ? "inactive" : "active";
+
+    const newService = {
+      serviceName: serviceName.trim(),
+      category: category.trim(),
+      description: description.trim(),
+      price: parsedPrice,
+      duration: Math.round(parsedDuration),
+      image: image.trim(),
+      status: finalStatus,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const insertResult = await servicesCollection.insertOne(newService);
+
+    res.status(201).json({
+      success: true,
+      message: "Service created successfully!",
+      data: {
+        _id: insertResult.insertedId,
+        ...newService,
+      },
+    });
+  } catch (error) {
+    console.error("Error creating service:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create service",
+      error: error.message,
+    });
+  }
+});
+
+// update an existing service (Admin only)
+app.put("/api/admin/services/:id", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    const { id } = req.params;
+    const {
+      serviceName,
+      category,
+      description,
+      price,
+      duration,
+      image,
+      status,
+    } = req.body || {};
+
+    const updateFields = {
+      updatedAt: new Date(),
+    };
+
+    if (serviceName !== undefined) {
+      if (!serviceName.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Service name cannot be empty",
+        });
+      }
+      updateFields.serviceName = serviceName.trim();
+    }
+
+    if (category !== undefined) {
+      if (!category.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Service category cannot be empty",
+        });
+      }
+      updateFields.category = category.trim();
+    }
+
+    if (description !== undefined) {
+      if (!description.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Service description cannot be empty",
+        });
+      }
+      updateFields.description = description.trim();
+    }
+
+    if (price !== undefined) {
+      const parsedPrice = Number(price);
+      if (isNaN(parsedPrice) || parsedPrice <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Price must be a positive number",
+        });
+      }
+      updateFields.price = parsedPrice;
+    }
+
+    if (duration !== undefined) {
+      const parsedDuration = Number(duration);
+      if (isNaN(parsedDuration) || parsedDuration <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Duration must be a positive number (in minutes)",
+        });
+      }
+      updateFields.duration = Math.round(parsedDuration);
+    }
+
+    if (image !== undefined && image.trim()) {
+      updateFields.image = image.trim();
+    }
+
+    if (status !== undefined) {
+      updateFields.status =
+        status === "inactive" || status === "Inactive" ? "inactive" : "active";
+    }
+
+    // Support both ObjectId and plain string ID as per DB invariants
+    let filter = { _id: id };
+    if (ObjectId.isValid(id)) {
+      filter = { $or: [{ _id: new ObjectId(id) }, { _id: id }] };
+    }
+
+    const updateResult = await servicesCollection.updateOne(filter, {
+      $set: updateFields,
+    });
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    const updatedService = await servicesCollection.findOne(filter);
+
+    res.status(200).json({
+      success: true,
+      message: "Service updated successfully!",
+      data: updatedService,
+    });
+  } catch (error) {
+    console.error("Error updating service:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update service",
+      error: error.message,
+    });
+  }
+});
+
+// activate / deactivate service status (Admin only)
+app.patch("/api/admin/services/:id/status", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    const { id } = req.params;
+    const { status } = req.body || {};
+
+    if (!status || !["active", "inactive"].includes(status.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message: "Status must be either 'active' or 'inactive'",
+      });
+    }
+
+    const normalizedStatus = status.toLowerCase();
+
+    // Support both ObjectId and plain string ID
+    let filter = { _id: id };
+    if (ObjectId.isValid(id)) {
+      filter = { $or: [{ _id: new ObjectId(id) }, { _id: id }] };
+    }
+
+    const updateResult = await servicesCollection.updateOne(filter, {
+      $set: {
+        status: normalizedStatus,
+        updatedAt: new Date(),
+      },
+    });
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Service has been ${
+        normalizedStatus === "active" ? "activated" : "deactivated"
+      } successfully!`,
+      status: normalizedStatus,
+    });
+  } catch (error) {
+    console.error("Error updating service status:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update service status",
+      error: error.message,
+    });
+  }
+});
+
+// remove a service (Admin only)
+app.delete("/api/admin/services/:id", verifyJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    const { id } = req.params;
+
+    // Support both ObjectId and plain string ID
+    let filter = { _id: id };
+    if (ObjectId.isValid(id)) {
+      filter = { $or: [{ _id: new ObjectId(id) }, { _id: id }] };
+    }
+
+    const deleteResult = await servicesCollection.deleteOne(filter);
+
+    if (deleteResult.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Service deleted successfully!",
+    });
+  } catch (error) {
+    console.error("Error deleting service:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete service",
+      error: error.message,
+    });
+  }
+});
+
 /* ========================================
       User Profile APIs
 ======================================== */
