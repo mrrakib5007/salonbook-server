@@ -651,6 +651,143 @@ app.patch("/api/customer/appointments/:id/cancel", verifyJWT, async (req, res) =
   }
 });
 
+/* ========================================
+      User Profile APIs
+======================================== */
+
+// GET /api/user/profile - Fetch authenticated user profile
+app.get("/api/user/profile", verifyJWT, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    if (!userId && !userEmail) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: User identification missing",
+      });
+    }
+
+    let userDoc = null;
+    if (userId) {
+      userDoc = await usersCollection.findOne({ _id: userId });
+      if (!userDoc && ObjectId.isValid(userId)) {
+        userDoc = await usersCollection.findOne({ _id: new ObjectId(userId) });
+      }
+    }
+    if (!userDoc && userEmail) {
+      userDoc = await usersCollection.findOne({ email: userEmail });
+    }
+
+    if (!userDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "User profile not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      user: {
+        _id: userDoc._id,
+        name: userDoc.name || "",
+        email: userDoc.email || "",
+        image: userDoc.image || "",
+        phone: userDoc.phone || userDoc.phoneNumber || "",
+        createdAt: userDoc.createdAt || null,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching user profile:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch user profile",
+      error: error.message,
+    });
+  }
+});
+
+// PATCH /api/user/profile - Update permitted user profile information
+app.patch("/api/user/profile", verifyJWT, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    if (!userId && !userEmail) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: User identification missing",
+      });
+    }
+
+    // Permitted fields only: name, image, and optional phone
+    const { name, image, phone } = req.body || {};
+
+    if (name !== undefined && typeof name === "string" && !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Name cannot be empty",
+      });
+    }
+
+    const updateFields = {
+      updatedAt: new Date(),
+    };
+
+    if (typeof name === "string") updateFields.name = name.trim();
+    if (typeof image === "string") updateFields.image = image.trim();
+    if (typeof phone === "string") updateFields.phone = phone.trim();
+
+    let filter = null;
+    if (userId) {
+      const exists = await usersCollection.findOne({ _id: userId });
+      if (exists) filter = { _id: userId };
+      else if (ObjectId.isValid(userId)) {
+        const existsObj = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        if (existsObj) filter = { _id: new ObjectId(userId) };
+      }
+    }
+    if (!filter && userEmail) {
+      filter = { email: userEmail };
+    }
+
+    if (!filter) {
+      return res.status(404).json({
+        success: false,
+        message: "User account not found for profile update",
+      });
+    }
+
+    const updateResult = await usersCollection.updateOne(filter, { $set: updateFields });
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "User account not found",
+      });
+    }
+
+    const updatedUser = await usersCollection.findOne(filter);
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully!",
+      user: {
+        name: updatedUser?.name || "",
+        image: updatedUser?.image || "",
+        phone: updatedUser?.phone || updatedUser?.phoneNumber || "",
+      },
+    });
+  } catch (error) {
+    console.error("Error updating user profile:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update profile",
+      error: error.message,
+    });
+  }
+});
+
 
 
 /* ========================================
